@@ -1,0 +1,11 @@
+.DS_Store
+.output
+map.txt
+main/include/user_config.local.h
+bin
+build
+*.old
+main/.main.c.swp
+main/Kconfig.projbuild
+
+
