@@ -113,7 +113,12 @@ void thermostat_process(thermostat_internals_t* i)
             }
         }
         send_value('O', i->output ? 1 : 0); 
-    }
+
+        if(ESP_OK!=gpio_set_level(PIN_OUTPUT, i->output))
+        { 
+            printf("thermostat_process error: gpio_set_level fail!\n");
+        }
+    } 
 }
 
 bool cmd_process(const char*buff, char opcode, int value)
