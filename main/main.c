@@ -2,215 +2,224 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
-#include "esp_wifi.h"
-#include "esp_system.h"
-#include "nvs_flash.h"
-#include "esp_event_loop.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "freertos/event_groups.h"
-
-#include "lwip/sockets.h"
-#include "lwip/dns.h"
-#include "lwip/netdb.h"
+#include "freertos/semphr.h"
+#include "freertos/queue.h"
 
 #include "esp_log.h"
-#include "mqtt.h"
 #include "driver/gpio.h"
 
+#include "comm.h"
+#include "dht22.h"
+
 #define PIN_OUTPUT  GPIO_NUM_23
-#define PIN_INPUT   GPIO_NUM_22
+
+typedef enum
+{
+    tm_off
+,   tm_auto
+,   tm_heat
+} thermostat_mode_t;
+
+typedef struct
+{
+    int16_t             setpoint;       // in tenths of celsius degrees
+    int16_t             hysteresis;     // in tenths of celsius degrees
+    int16_t             temperature;    // in tenths of celsius degrees
+    thermostat_mode_t   mode;           
+    bool                output;
+
+    uint16_t            humidity;       // just to report..
+
+} thermostat_internals_t;
+
+const char *MQTT_TAG = "THERMOSTAT";
 
 const gpio_config_t g_gpio_config[] = {
     { 1<<PIN_OUTPUT, GPIO_MODE_OUTPUT|GPIO_MODE_INPUT, GPIO_PULLUP_DISABLE, GPIO_PULLDOWN_DISABLE, GPIO_INTR_DISABLE }
-,   { 1<<PIN_INPUT,  GPIO_MODE_INPUT,                  GPIO_PULLUP_ENABLE,  GPIO_PULLDOWN_DISABLE, GPIO_INTR_NEGEDGE }
 ,   { 0 }
 };
 
-static SemaphoreHandle_t g_semaphore = NULL;
-static mqtt_client *g_mqtt_client = NULL;
-
-static void IRAM_ATTR my_isr_handler(void* arg)
-{
-    if(g_semaphore)
-    {
-        if(pdTRUE != xSemaphoreGiveFromISR(g_semaphore, NULL))
-        {   // Handle the error
-        } 
-    }
-}
-
-static void my_task(void* arg)
-{
-    static TickType_t wait_for = 5000 / portTICK_PERIOD_MS;
-
-    if (g_semaphore)
-    {
-        for(;;)
-        {
-            if(pdTRUE == xSemaphoreTake(g_semaphore, wait_for))
-            {
-                if(ESP_OK==gpio_set_level(PIN_OUTPUT, !gpio_get_level( PIN_OUTPUT )))
-                {
-                    printf("Setting level %u for pin #%u!\n", gpio_get_level( PIN_OUTPUT ), PIN_OUTPUT);
-                }
-                else 
-                {
-                    printf("ERROR during gpio_set_level for pin #%u!\n", PIN_OUTPUT);
-                }
-            }
-
-            if(g_mqtt_client)
-            {
-                char s[10] = { 0 };
-                sprintf(s, "OUT=%u",gpio_get_level( PIN_OUTPUT ));
-                mqtt_publish(g_mqtt_client, "/test", s, strlen(s), 0, 0);
-            }
-        }
-    }
-    else
-    {
-        printf("ERROR. The semaphore must be created first!\n");
-    }
-}
-
-
-const char *MQTT_TAG = "MQTT_SAMPLE";
-
-void connected_cb(mqtt_client *client, mqtt_event_data_t *event_data)
-{
-    g_mqtt_client = client;
-    mqtt_subscribe(client, "/test", 0);
-    mqtt_publish(client, "/test", "BEGIN!", 6, 0, 0);
-}
-void disconnected_cb(mqtt_client *client, mqtt_event_data_t *event_data)
-{
-    g_mqtt_client = NULL;
-    ESP_LOGI(MQTT_TAG, "[APP] disconnected callback");
-}
-void reconnect_cb(mqtt_client *client, mqtt_event_data_t *event_data)
-{ 
-    g_mqtt_client = client;
-    ESP_LOGI(MQTT_TAG, "[APP] reconnect callback");
-}
-void subscribe_cb(mqtt_client *client, mqtt_event_data_t *event_data)
-{
-    ESP_LOGI(MQTT_TAG, "[APP] Subscribe ok, test publish msg");
-    mqtt_publish(client, "/test", "abcde", 5, 0, 0);
-}
-
-void publish_cb(mqtt_client *client, mqtt_event_data_t *event_data)
-{
-    ESP_LOGI(MQTT_TAG, "[APP] publish callback"); 
-}
-void data_cb(mqtt_client *client, mqtt_event_data_t *event_data)
-{
-    if(event_data->data_offset == 0) {
-
-        char *topic = malloc(event_data->topic_length + 1);
-        memcpy(topic, event_data->topic, event_data->topic_length);
-        topic[event_data->topic_length] = 0;
-        ESP_LOGI(MQTT_TAG, "[APP] Publish topic: %s", topic);
-        free(topic);
-    }
-
-    char *data = malloc(event_data->data_length + 1);
-    memcpy(data, event_data->data, event_data->data_length);
-    data[event_data->data_length] = 0;
-
-    ESP_LOGI(MQTT_TAG, "[APP] Publish data[%d/%d bytes]",
-             event_data->data_length + event_data->data_offset,
-             event_data->data_total_length);
-
-    if(g_semaphore && 0==strcmp(data, "TOGGLE"))
-    {
-        if(pdTRUE != xSemaphoreGive(g_semaphore))
-        {   // Handle the error
-        }
-    }
-
-    ESP_LOGI(MQTT_TAG, "[APP] Publish data[%s]", data);
-
-    free(data);
-
-}
-
-mqtt_settings settings = {
-    .host = "192.168.34.18",
-#if defined(CONFIG_MQTT_SECURITY_ON)
-    .port = 8883, // encrypted
-#else
-    .port = 1883, // unencrypted
-#endif
-    .client_id = "mqtt_client_id",
-    .username = "user",
-    .password = "pass",
-    .clean_session = 0,
-    .keepalive = 120,
-    .lwt_topic = "/test",
-    .lwt_msg = "offline",
-    .lwt_qos = 0,
-    .lwt_retain = 0,
-    .connected_cb = connected_cb,
-    .disconnected_cb = disconnected_cb,
-    .subscribe_cb = subscribe_cb,
-    .publish_cb = publish_cb,
-    .data_cb = data_cb
+thermostat_internals_t g_thermostat_internals = {
+    .setpoint = 250
+,   .hysteresis = 5
+,   .temperature = 250
+,   .mode = tm_auto
+,   .output = false 
 };
 
+bool temperature_parse(const char* s, int16_t* temperature)
+{ 
+    int i;
 
+    if(!s) return false;
+    if(!temperature) return false;
 
-static esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
+    i = atoi(s);
+    *temperature = (int16_t)i;
+    return true;
+}
+
+void send_value(char opcode, int value)
 {
-    switch(event->event_id) {
-        case SYSTEM_EVENT_STA_START:
-            esp_wifi_connect();
-            break;
-        case SYSTEM_EVENT_STA_GOT_IP:
-            mqtt_start(&settings);
-            //init app here
-            break;
-        case SYSTEM_EVENT_STA_DISCONNECTED:
-            /* This is a workaround as ESP32 WiFi libs don't currently
-               auto-reassociate. */
-            esp_wifi_connect();
-            mqtt_stop();
-            break;
-        default:
-            break;
+    char s[15] = { 0 };
+
+    sprintf(s, "%c=%d", opcode&0xDF, value); 
+    comm_send_string(CONFIG_MQTT_TOPIC_DEFAULT, s); 
+}
+
+void send_mode(void)
+{
+    char s[10] = { 0 };
+    
+    sprintf(s, "M=%s", (tm_off==g_thermostat_internals.mode ? "off" : 
+                        tm_auto==g_thermostat_internals.mode ? "auto" :
+                        tm_heat==g_thermostat_internals.mode ? "heat" : "err" ));
+    comm_send_string(CONFIG_MQTT_TOPIC_DEFAULT, s); 
+}
+
+
+
+/**
+ *      T = off
+ *      ---------------- setpoint+hysteresis
+ *      
+ *      ================ setpoint
+ *      
+ *      ---------------- setpoint-hysteresis
+ *      T = on
+ */
+void thermostat_process(thermostat_internals_t* i)
+{ 
+    if(i)
+    {
+        switch(i->mode)
+        { 
+            case tm_off: 
+            case tm_heat: 
+            {
+                i->output = (tm_heat==i->mode);
+            } break;
+            case tm_auto:
+            {
+                int16_t threshold = i->setpoint + (i->output ? i->hysteresis : - i->hysteresis);
+                
+                i->output = (i->temperature<threshold);
+            }
+        }
+        send_value('O', i->output ? 1 : 0); 
     }
-    return ESP_OK;
 }
 
-static void wifi_conn_init(void)
+bool cmd_process(const char*buff, char opcode, int value)
 {
-    tcpip_adapter_init();
-    ESP_ERROR_CHECK(esp_event_loop_init(wifi_event_handler, NULL));
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = CONFIG_WIFI_SSID,
-            .password = CONFIG_WIFI_PASSWORD,
-        },
-    };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
-    ESP_LOGI(MQTT_TAG, "start the WIFI SSID:[%s] password:[%s]", CONFIG_WIFI_SSID, "******");
-    ESP_ERROR_CHECK(esp_wifi_start());
+    char s[15] = { 0 };
+
+    if(buff && ((opcode>='a' && opcode<='z') || (opcode>='A' && opcode<='Z') ))
+    {
+        opcode |= 0x20;
+
+        s[0] = opcode;
+
+        if(0==strcmp(buff, s))
+        { 
+            send_value(opcode, value);
+            return true;
+        } 
+    } 
+    return false;
 }
+
+void comm_on_data(const char* topic, const char* buff)
+{ 
+    if(0==strcmp(topic, CONFIG_MQTT_TOPIC_DEFAULT) && buff && strlen(buff)<=10)
+    {
+        if(0==strncmp(buff, "s=",2))
+        {
+            if(temperature_parse(buff+2, &g_thermostat_internals.setpoint))
+            {
+                printf("New setpoint is set at %d celsius degrees\n", g_thermostat_internals.setpoint);
+            }
+            else
+            {
+                printf("ERROR trying to update the setpoint [%s]\n", buff); 
+            }
+
+            send_value('S', g_thermostat_internals.setpoint);
+
+            thermostat_process(&g_thermostat_internals);
+        }
+        else if(0==strncmp(buff, "d=",2))
+        {
+            if(temperature_parse(buff+2, &g_thermostat_internals.hysteresis))
+            {
+                printf("New hysteresis is set at %d celsius degrees\n", g_thermostat_internals.hysteresis);
+            }
+            else
+            {
+                printf("ERROR trying to update the hysteresis [%s]\n", buff); 
+            }
+
+            send_value('D', g_thermostat_internals.hysteresis);
+
+            thermostat_process(&g_thermostat_internals);
+        }
+        else if(0==strcmp(buff, "m=auto"))
+        { 
+            g_thermostat_internals.mode = tm_auto;
+
+            thermostat_process(&g_thermostat_internals);
+            send_mode();
+        }
+        else if(0==strcmp(buff, "m=heat"))
+        { 
+            g_thermostat_internals.mode = tm_heat;
+
+            thermostat_process(&g_thermostat_internals);
+            send_mode();
+        }
+        else if(0==strcmp(buff, "m=off"))
+        { 
+            g_thermostat_internals.mode = tm_off;
+
+            thermostat_process(&g_thermostat_internals);
+            send_mode();
+        }
+        else if(cmd_process(buff, 'o', g_thermostat_internals.output ? 1 : 0) )
+        {
+        }
+        else if(cmd_process(buff, 't', g_thermostat_internals.temperature) )
+        {
+        }
+        else if(cmd_process(buff, 'h', g_thermostat_internals.humidity) )
+        {
+        }
+        else if(cmd_process(buff, 's', g_thermostat_internals.setpoint) )
+        {
+        }
+        else if(cmd_process(buff, 'd', g_thermostat_internals.hysteresis) )
+        {
+        }
+        else if(0==strcmp(buff, "m"))
+        {
+            send_mode(); 
+        }
+    }
+}
+
 
 void app_main()
 {
+    int i;
+
     ESP_LOGI(MQTT_TAG, "[APP] Startup..");
     ESP_LOGI(MQTT_TAG, "[APP] Free memory: %d bytes", system_get_free_heap_size());
     ESP_LOGI(MQTT_TAG, "[APP] SDK version: %s, Build time: %s", system_get_sdk_version(), BUID_TIME);
-
-    int i;
 
 
     for(i=0; g_gpio_config[i].pin_bit_mask; ++i)
@@ -221,23 +230,71 @@ void app_main()
         }
     }
 
-    //create a semaphore to synchronize events between the ISR and the worker task
-    g_semaphore = xSemaphoreCreateBinary();
+    comm_init(comm_on_data);
 
-    //start worker task
-    xTaskCreate(my_task, "my_task", 2048, NULL, 10, NULL);
+    dht22_init();
 
-    //install gpio isr service
-    gpio_install_isr_service(0);
+    for(i=0; ; ++i)
+    {   
+        uint16_t  humidity;
+        int16_t   temperature;
+        bool      humidity_reported = false;
+        bool      temperature_reported = false;
 
-    //hook isr handler for specific gpio pin
-    gpio_isr_handler_add(PIN_INPUT, my_isr_handler, (void*) PIN_INPUT);
+        if(dht22_read(&humidity, &temperature))
+        {
+            printf("DHT22 read successfully!\n");
+            printf("  humidity = %i.%u%%\n", humidity/10, humidity%10); 
+            printf("  temperature = %i.%u degrees\n", temperature/10, temperature%10); 
+        } 
 
-    nvs_flash_init();
-    wifi_conn_init();
+        if(temperature!=g_thermostat_internals.temperature)
+        {
+            g_thermostat_internals.temperature = temperature;
+            thermostat_process(&g_thermostat_internals);
 
-    for(;;)
-    {   // Wait forever
-        vTaskDelay( portMAX_DELAY );
+            send_value('T', g_thermostat_internals.temperature);
+            temperature_reported = true;
+        }
+
+        if(g_thermostat_internals.humidity!=humidity)
+        {
+            g_thermostat_internals.humidity = humidity;
+            send_value('H', g_thermostat_internals.humidity);
+            humidity_reported = true;
+        } 
+        
+        if((i%12)==0 && !temperature_reported)
+        {
+            send_value('T', g_thermostat_internals.temperature);
+        }
+
+        if((i%12)==1 && !humidity_reported)
+        {
+            send_value('H', g_thermostat_internals.humidity);
+        }
+
+        if((i%12)==2)
+        {
+            send_value('S', g_thermostat_internals.setpoint);
+        }
+
+        if((i%12)==3)
+        {
+            send_value('D', g_thermostat_internals.hysteresis);
+        }
+
+        if((i%12)==4)
+        {
+            send_value('O', g_thermostat_internals.output ? 1 : 0); 
+        }
+
+        if((i%12)==5)
+        { 
+            send_mode();
+        }
+
+        vTaskDelay( 5000 / portTICK_PERIOD_MS );
     } 
 }
+

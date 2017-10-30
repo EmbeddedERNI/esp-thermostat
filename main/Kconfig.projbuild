@@ -1,0 +1,27 @@
+menu "Thermostat MQTT Application sample"
+
+config WIFI_SSID
+    string "WiFi SSID"
+    default "myssid"
+    help
+        SSID (network name) for the example to connect to.
+
+config WIFI_PASSWORD
+    string "WiFi Password"
+    default "mypassword"
+    help
+        WiFi password (WPA or WPA2) for the example to use.
+
+config MQTT_BROKER_ADDRESS
+    string "MQTT broker address"
+    default "192.168.34.1"
+    help
+        MQTT broker address to connect to.
+
+config MQTT_TOPIC_DEFAULT
+    string "Default MQTT topic"
+    default "/test"
+    help
+        Default MQTT topic to connect to.
+
+endmenu

@@ -6,6 +6,6 @@ bin
 build
 *.old
 main/.main.c.swp
-main/Kconfig.projbuild
+sdkconfig
 
 
