@@ -1,5 +1,5 @@
 /**
- *  @brief     Module to read a DHT22 sensor using an Espressif ESP32 module.
+ *  @brief     Proof of concept of a simple thermostat using a ESP32 module and a DHT22 sensor.
  *
  *  @file      dht22.c
  *  @author    Hernan Bartoletti - hernan.bartoletti@gmail.com
