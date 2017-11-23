@@ -1,3 +1,10 @@
+/**
+ *  @brief     Proof of concept of a simple thermostat using a ESP32 module and a DHT22 sensor.
+ *
+ *  @file      main.c
+ *  @author    Hernan Bartoletti - hernan.bartoletti@gmail.com
+ *  @copyright MIT License
+ */
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
